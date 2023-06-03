@@ -30,6 +30,7 @@
 #include "libusb_ll.hpp"
 #include "jtag.hpp"
 #include "part.hpp"
+#include "libgpiodSpiBitbang.hpp"
 #include "spiFlash.hpp"
 #include "rawParser.hpp"
 #include "xilinx.hpp"
@@ -250,21 +251,22 @@ int main(int argc, char **argv)
 		if (args.prg_type == Device::PRG_NONE)
 			args.prg_type = Device::WR_FLASH;
 
-		FtdiSpi *spi = NULL;
 		spi_pins_conf_t pins_config;
 		if (board)
 			pins_config = board->spi_pins_config;
 
-		try {
-			spi = new FtdiSpi(cable, pins_config, args.freq, args.verbose > 0);
-		} catch (std::exception &e) {
-			printError("Error: Failed to claim cable");
-			return EXIT_FAILURE;
-		}
-
 		int spi_ret = EXIT_SUCCESS;
 
 		if (board && board->manufacturer != "none") {
+			FtdiSpi *spi = NULL;
+
+			try {
+				spi = new FtdiSpi(cable, pins_config, args.freq, args.verbose > 0);
+			} catch (std::exception &e) {
+				printError("Error: Failed to claim cable");
+				return EXIT_FAILURE;
+			}
+
 			Device *target;
 			if (board->manufacturer == "efinix") {
 				target = new Efinix(spi, args.bit_file, args.file_type,
@@ -299,15 +301,33 @@ int main(int argc, char **argv)
 			if (args.protect_flash)
 				if (!target->protect_flash(args.protect_flash))
 					spi_ret = EXIT_FAILURE;
+
+			delete spi;
 		} else {
-			RawParser *bit = NULL;
-			if (board && board->reset_pin) {
-				spi->gpio_set_output(board->reset_pin, true);
-				spi->gpio_clear(board->reset_pin, true);
+			FtdiSpi *ftdiSpi = NULL;
+			SPIInterface *spi = NULL;
+
+			if (board && board->cable_name == "libgpiod") {
+				spi = new LibgpiodSpiBitbang(&pins_config, args.device, args.verbose);
+			} else {
+				try {
+					ftdiSpi = new FtdiSpi(cable, pins_config, args.freq, args.verbose > 0);
+					spi = (SPIInterface *)ftdiSpi;
+				} catch (std::exception &e) {
+					printError("Error: Failed to claim cable");
+					return EXIT_FAILURE;
+				}
 			}
 
-			SPIFlash flash((SPIInterface *)spi, args.unprotect_flash, args.verbose);
+			if (ftdiSpi && board && board->reset_pin) {
+				ftdiSpi->gpio_set_output(board->reset_pin, true);
+				ftdiSpi->gpio_clear(board->reset_pin, true);
+			}
+
+			SPIFlash flash(spi, args.unprotect_flash, args.verbose);
 			flash.display_status_reg();
+
+			RawParser *bit = NULL;
 
 			if (args.prg_type != Device::RD_FLASH &&
 					(!args.bit_file.empty() || !args.file_type.empty())) {
@@ -354,11 +374,11 @@ int main(int argc, char **argv)
 				if (!flash.enable_protection(args.protect_flash))
 					spi_ret = EXIT_FAILURE;
 
-			if (board && board->reset_pin)
-				spi->gpio_set(board->reset_pin, true);
-		}
+			if (ftdiSpi && board && board->reset_pin)
+				ftdiSpi->gpio_set(board->reset_pin, true);
 
-		delete spi;
+			delete spi;
+		}
 
 		return spi_ret;
 	}
